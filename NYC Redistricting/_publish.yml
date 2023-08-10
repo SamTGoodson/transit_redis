@@ -1,0 +1,4 @@
+- source: project
+  quarto-pub:
+    - id: fd0ce2f7-a403-4cdb-aacc-087de70ace6a
+      url: 'https://quartopub.com/sites/samgoodson/nyc-redistricting'

@@ -1,0 +1,23 @@
+{
+  "about.qmd": {
+    "about.html": "32ca3598"
+  },
+  "index.qmd": {
+    "index.html": "0eef9e55"
+  },
+  "posts/post-with-code/index.qmd": {
+    "index.html": "39c3e850"
+  },
+  "posts/welcome/index.qmd": {
+    "index.html": "7eb20ae4"
+  },
+  "posts/Community of Interest/web2.qmd": {
+    "web2.html": "0586b98c"
+  },
+  "posts/Final Assignment/FinalPaper.qmd": {
+    "FinalPaper.html": "4386b6e7"
+  },
+  "posts/NYC's Transit Underserved/NYC's Transit Underserved.qmd": {
+    "NYC's Transit Underserved.html": "e18c9a3c"
+  }
+}

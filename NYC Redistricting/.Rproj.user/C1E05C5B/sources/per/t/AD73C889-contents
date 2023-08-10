@@ -1,0 +1,529 @@
+---
+title: "NYC's Underserved Transit Community"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: Load Packages 
+#| include: false
+
+library(tidycensus)
+library(censusapi)
+library(sf)
+library(leaflet)
+library(tidyverse)
+library(lubridate)
+library(gt)
+library(rio)
+library(janitor)
+library(stargazer)
+library(stplanr)
+library(tmap)          
+library(sfnetworks) 
+```
+
+```{r}
+#| label: load data
+#| include: false
+
+nyc_counties<-c('005','047','061','081','085')
+
+ny_transpo = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = "B08301")
+
+table_transpo<-pivot_wider(ny_transpo,names_from = variable, values_from = c(estimate,moe))
+
+ny_race = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B02001')
+
+table_race<-pivot_wider(ny_race,names_from = variable, values_from = c(estimate,moe))
+
+joined<-left_join(table_race,table_transpo)
+
+ny_ctime = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B08303')
+
+table_ctime<-pivot_wider(ny_ctime,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_ctime)
+
+ny_cit = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B05001')
+table_cit<-pivot_wider(ny_cit,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_cit)
+
+ny_mhi = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B19013')
+table_mhi<-pivot_wider(ny_mhi,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_mhi)
+
+ny_eth = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B03002')
+table_eth<-pivot_wider(ny_eth,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_eth)
+
+nyc_medrent<- get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B25064')
+table_medrent<-pivot_wider(nyc_medrent,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_medrent)
+
+nyc_rentperc<- get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B25070')
+table_rentperc<-pivot_wider(nyc_rentperc,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_rentperc)
+
+
+acs<-joined%>%
+  rename('white' = estimate_B02001_002, 'black' = estimate_B02001_003, 'am_ind' = estimate_B02001_004,'asian'=estimate_B02001_005,'nat_haw' = estimate_B02001_006, 'other' = estimate_B02001_007,
+         'whiteNH' = estimate_B03002_003, 'black_eth' = estimate_B03002_004, 'am_ind_eth' = estimate_B03002_005,'asian_eth'=estimate_B03002_006,'nat_haw_eth' = estimate_B03002_007, 'other_eth' = estimate_B03002_008,'hispanic' = estimate_B03002_012,
+         'bus' = estimate_B08301_011, 'bike' = estimate_B08301_018, 'walk' = estimate_B08301_019, 'subway' = estimate_B08301_012,'car' = estimate_B08301_002,
+    'citizen' = estimate_B05001_002,'citizenPR' = estimate_B05001_003,'citizenBA'=estimate_B05001_004, 'naturalized' = estimate_B05001_005, 'noncit' = estimate_B05001_006,
+         'mhi' = estimate_B19013_001, 'med_rent' = estimate_B25064_001)
+
+acs$transpo_all<-acs$estimate_B08303_001
+acs$perc_bus<-((acs$bus/acs$transpo_all)*100)
+acs$perc_subway<-((acs$subway/acs$transpo_all)*100)
+
+bus<-import('~/Redistricting/Redistricting/MTA_Bus_Speeds__Beginning_2015.csv')
+bus<-bus%>%
+  clean_names()
+bus$month <- ym(bus$month)
+```
+
+```{r}
+#| label: new vars
+#| include: false
+
+acs<-acs%>%
+separate(NAME,c('Tract','County','State'), sep = ",")
+
+acs<-acs%>%
+rename('total_pop' = estimate_B03002_001)
+
+acs<-acs%>%
+  mutate(perc_white = round((whiteNH/total_pop)*100),
+         perc_hisp = round((hispanic/total_pop)*100),
+         perc_black = round((black_eth/total_pop)*100),
+         perc_asian = round((asian_eth/total_pop)*100))
+
+acs<-acs%>%
+  mutate(transit = (bus + subway),
+         no_car = (bus + subway + walk + bike),
+         trans_min_car = ((bus+subway)-car),
+         no_car_min = ((bus + subway + walk + bike) - car))
+
+acs<-acs%>%
+  mutate(avg_com = ((estimate_B08303_002*5) + (estimate_B08303_003*9) + 
+                      (estimate_B08303_004*14) + (estimate_B08303_005*19) + 
+                      (estimate_B08303_006* 24) + (estimate_B08303_007*29) +
+                      (estimate_B08303_008 *34) + (estimate_B08303_009*39) +
+                      (estimate_B08303_010*44) + (estimate_B08303_011*59) + 
+                      (estimate_B08303_012 * 89) + (estimate_B08303_013*110))/(estimate_B08301_001+1))
+```
+
+```{r}
+#| label: maps
+#| include: false
+
+c_map<-read_sf('~/Redistricting/NYCShapefile/nyct2020_22b')
+
+map2<-left_join(c_map,acs)
+map2_sf <- st_transform(map2, "+init=epsg:4326")
+map2<-left_join(c_map,acs)
+map2_sf <- st_transform(map2, "+init=epsg:4326")
+
+bus_map<-read_sf('~/Redistricting/BusShapefile')
+bm_sf <- st_transform(bus_map, "+init=epsg:4326")
+
+prelim<-read_sf('~/Redistricting/PrelimOneShapefile/shapefile')
+prelim_sf <- st_transform(prelim, "+init=epsg:4326")
+
+cc_map<-read_sf('~/Redistricting/CCShapefile/nycc_22b')
+cc_sf <- st_transform(cc_map, "+init=epsg:4326")
+
+slow_bus<-bus_map%>%
+  filter(route_id %in% c("M57", "M50",  "M31",  "BX35", "M125", "M42",  "BX19", "M102",
+                          "B35",  "B63",  "M103", "M3",   "M7", "B12",  "M104", "M8",  
+                          "B45",  "M100", "BX11", "BX32",'B11'))
+
+slow_sf <- st_transform(slow_bus, "+init=epsg:4326")
+
+subway_stops<-read_sf('~/Redistricting/subwaystop')
+sub <- st_transform(subway_stops, "+init=epsg:4326")
+
+
+```
+
+```{r new maps}
+#| include: false
+mobility <- read_csv("~/Redistricting/Redistricting/Citywide_Mobility_Survey_-_Trip_Survey_2019.csv")
+nta<-sf::read_sf('~/Redistricting/NTAShapefile')
+cdt<-read_sf('~/Redistricting/CDT')
+
+survey<-read_sf('~/Redistricting/survey_zones')
+```
+
+```{r clean}
+#| include: false
+mobility$o_cms_zone[mobility$o_cms_zone == 'Upper Manhattan']<-'Northern Manhattan'
+mobility$d_cms_zone[mobility$d_cms_zone == 'Upper Manhattan']<-'Northern Manhattan'
+
+mobility<-mobility%>%
+  filter(!o_cms_zone %in% c('JFK','LGA'))
+mobility<-mobility%>%
+  filter(!d_cms_zone %in% c('JFK','LGA'))
+mobility<-mobility%>%
+  mutate(bus_plus = if_else(mode_type_detailed %in% c(7,15,16,17,22,23),'bus','non'))
+```
+
+```{r}
+#| include: false
+#| warning: false
+
+zones_attr <- mobility%>%
+  drop_na(o_cms_zone,d_cms_zone)%>%
+  group_by(o_cms_zone,d_cms_zone,mode_type)%>%
+  summarise(n = n())%>%
+  pivot_wider(names_from = mode_type, values_from = n)
+
+zones_attr<-zones_attr%>%
+  rename('Taxi' = `1`, 'Uber' = `2`, 'Commuter_Rail' = `3`,'Bus' =`4`,
+         'Ferry' = `5`, 'Subway' = `6`, 'Car' = `7`, 'Bike' = `8`, 'Walk' = `9`,
+         'Other' = `10`)
+
+zones_attr[is.na(zones_attr)]<- 0
+zones_attr<-zones_attr%>%
+  mutate(all = (Taxi+Uber+Commuter_Rail+Bus+
+         Ferry+Subway+Car+Bike+Walk+Other))
+zones_attr$perc_bike<-((zones_attr$Bike/zones_attr$all)*100)
+zones_attr$perc_bus<-((zones_attr$Bus/zones_attr$all)*100)
+```
+
+```{r}
+#| include: false
+#| warning: false
+#| label: detailed mobility
+
+
+detailed_mobility = mobility%>%
+  drop_na(o_cms_zone,d_cms_zone)%>%
+  group_by(o_cms_zone,d_cms_zone,mode_type_detailed)%>%
+  summarise(n = n())%>%
+  pivot_wider(names_from = mode_type_detailed, values_from = n)
+
+detailed_mobility[is.na(detailed_mobility)]<- 0
+
+detailed_mobility<-detailed_mobility%>%
+rename(
+'yellow_taxi' = `1`, 'green_taxi' = `2`, 'uber' = `3`,
+'uberpool' = `4`, 'car_service' = `5`, 'commuter_rail' =`6`,
+'express_bus' = `7`, 'si_ferry' =`8`,'nyc_ferry' = `9`,
+'other_ferry' = `10`, 'subway' = `11`,'path'= `12`,'amrtrak'=`13`,
+'other_rail' = `14`,'sbs'=`15`,'lbs'=`16`,'accessaride'=`17`,'uni_shuttle'=`18`,
+'employer_shuttle'=`19`,'other_shuttle'=`20`,'intercity_bus'=`21`,'other_bus'=`22`,
+'dollar_van'=`23`,'carpool'=`24`,'hv1'=`25`,'hv2'=`26`,'hv3'=`27`,'hv4'=`28`,'hv5'=`29`,
+'other_vehicle'=`30`,'rental'=`31`,'work_car'=`32`,'friend_car'=`33`,'other_car'=`34`,
+'carshare'=`35`,'motorcycle'=`36`,'revel'=`37`,'moped'=`38`,'scooter_other'=`39`,
+'ebike'=`40`,'citi_bike'=`41`,'e_citi'=`42`,'dockless_share'=`43`,'e_dockless'=`44`,
+'rented_bike'=`45`,'borrowed_bike'=`46`,'owned_bike'=`47`,'walk'=`48`,'other'=`49`,
+'missing'=`995`)
+
+detailed_mobility<-detailed_mobility%>%
+  rowwise()%>%
+  mutate(all = sum(c_across(yellow_taxi:other_ferry)))
+colnames(detailed_mobility)
+detailed_mobility<-detailed_mobility%>%
+  mutate(bus_plus = (express_bus+sbs+lbs+accessaride+other_bus+dollar_van))
+
+
+alt_tab<-mobility%>%
+  drop_na(o_cms_zone)%>%
+  tabyl(o_cms_zone, bus_plus)%>%
+  adorn_percentages()
+
+alt_tab$zone_name <- alt_tab$o_cms_zone
+
+lines_map<-merge(alt_tab,survey, by = 'zone_name')
+lines_map<-st_as_sf(lines_map)
+
+detailed_mobility$perc_bus_plus<-round(((detailed_mobility$bus_plus/detailed_mobility$all)*100))
+detailed_mobility$perc_subway<-round(((detailed_mobility$subway/detailed_mobility$all)*100))
+
+od_intra = filter(detailed_mobility, o_cms_zone == d_cms_zone)
+od_inter = filter(detailed_mobility, o_cms_zone != d_cms_zone)
+desire_lines = od2line(od_inter, lines_map)
+
+```
+
+# Introduction
+
+On Thursday September 8th, 2022 the New York City bus system carried over 1.5 million riders, more than the average daily ridership of Boston's MBTA and the Bay Area's BART combined. Despite being vital to the daily life of over a million New Yorkers, the bus system remains slow and unreliable. A 2017 report by the Comptroller's office found the NYC bus system to be the slowest of 17 major urban bus systems surveyed. In June of 2022, the most recent month for which data is available from the MTA, 188 of the 219 local bus routes maintained average peak hour speeds of under 10mph.
+
+```{r}
+#| label: bus speed
+#| echo: false
+
+bus%>%
+  filter(month == '2022-06-01')%>%
+  group_by(borough)%>%
+  summarise(avg = round(mean(average_speed),1))%>%
+  gt()%>%
+  cols_label(
+    borough = 'Borough',
+    avg = 'Avg MPH'
+  )
+```
+
+The city's bus riders are the most prominent example of a larger group of disadvantaged New Yorkers; those whose residence, work location, or disability status keeps them from using the subway system for the entirety of their commute. These commuters are forced to rely on city buses, unregistered \$1 shuttles, Access-a-Rides, bicycles, or some combination of those and other commuting methods. If bus ridership is a reliable indicator for the group as a whole, they tend to live in transit deserts and be non-white and relatively lower income.
+
+</b>
+
+```{r}
+#| echo: false
+#| fig-cap: Toggle "Subway Stops" off for a less noisy map 
+
+map2_sf$transpo_all <- (map2_sf$transpo_all + .01)
+map2_sf$p_bus<-((map2_sf$bus/map2_sf$transpo_all)*100)
+
+pal2 <- colorNumeric(palette = "viridis", 
+                     domain = map2_sf$perc_bus)
+
+
+leaflet(map2_sf)%>%
+  addProviderTiles(provider = "CartoDB.Positron") %>%
+  addPolygons(popup = ~paste0(NTAName,'</br>',
+                              CTLabel,'</br>',
+                              perc_white,'% White','</br>',
+                              perc_black,'% Black','</br>',
+                              perc_hisp,'% Hispanic','</br>',
+                              perc_asian,'% Asian','</br>',
+                              '$',mhi,' Median Household Income'),
+              stroke = FALSE,
+              smoothFactor = 0,
+              fillOpacity = 0.7,
+              color = ~ pal2(p_bus),
+              group = 'Bus')%>%
+  addLegend("bottomright", 
+            pal = pal2, 
+            values = ~ p_bus,
+            title = "% Bus Riders",
+            opacity = 1,
+            group = 'Bus')%>%
+  addPolylines(data = slow_sf,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Slowest Bus Lines')%>%
+  addPolylines(data = prelim_sf,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Prelim City Council')%>%
+  addPolylines(data = cc_sf,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Current City Council')%>%
+  addMarkers(
+   data = sub,
+    label = ~stop_name,
+   group = 'Subway Stops'
+  )%>%
+  addLayersControl(
+    baseGroups = ('Bus'),
+    overlayGroups = c('Slowest Bus Lines','Prelim City Council','Current City Council','Subway Stops'),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+</b> </b>
+
+The lives of these New Yorkers could be dramatically improved by the actions of the New York City Council. Unlike issues of train performance, there are many steps that local lawmakers could take to improve the bus, bike, and Access-a-Ride systems without the involvement of Albany. Projects like the 14th street busway offer demonstrably successful policy examples, yet additional policy is slow to come.
+
+One possible explanation for the city government's reticence to act on behalf of this underserved population might be that their voice in City Hall is diluted. Bus riders and others with poor train service, a minority, are lumped into City Council districts that have decent train service, overwhelming their voice. This project will seek to explore the possibilities of considering these underserved populations in the redistricting process.
+
+# Why Transit?
+
+Lack of access to fast, reliable transit is more than an issue of convenience. The amount of time spent riding and waiting for transit has profound consequences in terms of racial and economic equality. In his posthumously published essay "A Testament of Hope" Martin Luther King Jr. chose to highlight transit inequity as a key driver of urban racial inequality. "Urban transit systems in most American cities, for example, have become a genuine civil rights issue" he wrote, "because the layout of rapid-transit systems determines the accessibility of jobs to the black community. If transportation systems in American cities could be laid out so as to provide an opportunity for poor people to get meaningful employment, then they could begin to move into the mainstream of American life" (King 1969). The problem King is describing is essentially what scholars of transit access have termed the "spatial mismatch hypothesis," the straightforward idea that, as a result of multiple interlocking patterns of discriminations, jobs exist in places that unemployed populations do not live.
+
+Though much of the research on spatial mismatch has concentrated on automobile commute times there is a literature that has explored the effect of transit access on employment opportunity. Thomas Sanchez evaluated the impact of a census block group's distance from rail and bus stops on the number of weeks worked in a year in Portland and Atlanta. Sanchez found that distance from a bus stop in particular had strong and significant impact on weeks worked on all populations in Atlanta and all white populations in Portland (the null nonwhite findings in Portland may be attributable to the small size of that population) (Sanchez 1998). Sanchez's findings are intriguing but they fail to account for the potentially endogenous relationship between transit locations and employment. Attempting to remedy this Justin Tyndall uses the exogenous shock of hurricane Sandy to measure the effect of resulting transit closures on employment. He finds that, while unemployment rates were declining across the city in the year after the hurricane, they increased in areas in which the R train, whose interborough service was temporarily shuttered, was the primary means of commuting to Manhattan (Tyndal 2018). These two studies are part of a larger literature on the interaction of transit availability and economic justice that will be explored more fully in the final product, the point here is that access to transit has a measurable effect on a community's economic opportunity, and therefore communities who have poor access to transit have at least one common source of immiseration.
+
+# Demographics
+
+Below is an exploration of some of the demographic commonalities of the transit underserved. They tend to be more Hispanic, lower income, have higher commute times, and be traveling more frequently through the outer boroughs.
+
+The relationship between a census tract's Hispanic population and its bus ridership holds across all 5 boroughs.
+
+```{r}
+#| echo: false
+#| warning: false
+acs%>%
+  ggplot(aes(hispanic,bus))+
+  geom_point()+
+  geom_smooth(method = 'lm', se = T)+
+  #facet_wrap(~County)+
+  theme_minimal()+
+  labs(title = "Bus Ridership by Hispanic Population", x = 'Hispanic Population',
+       y = 'Bus Ridership')
+```
+
+```{r}
+#| echo: false
+#| warning: false
+acs%>%
+  ggplot(aes(hispanic,bus))+
+  geom_point()+
+  geom_smooth(method = 'lm', se = T)+
+  facet_wrap(~County)+
+  theme_minimal()+
+  labs(title = "Bus Ridership by Hispanic Population", x = 'Hispanic Population',
+       y = 'Bus Ridership')
+```
+
+There is a negative relationship between Median Household Income and bus ridership that holds in every borough but Staten Island.
+
+```{r}
+#| echo: false
+#| warning: false
+acs%>%
+  ggplot(aes(mhi,bus))+
+  geom_point()+
+  geom_smooth(method = 'lm', se = T)+
+  facet_wrap(~County)+
+  theme_minimal()+
+  labs(title = "Bus Ridership by Median Household Income", x = 'MHI',
+       y = 'Bus Ridership')
+```
+
+There is also a positive relationship across all 5 boroughs between bus ridership and commute time.
+
+```{r}
+#| echo: false
+#| warning: false
+acs%>%
+  ggplot(aes(avg_com,bus))+
+  geom_point()+
+  geom_smooth(method = 'lm', se = T)+
+  facet_wrap(~County)+
+  theme_minimal()+
+  labs(title = "Bus Ridership by Hispanic Population", x = 'Hispanic Population',
+       y = 'Bus Ridership')
+```
+
+A simple OLS model considering only these three variables explains roughly a quarter of the variance in bus ridership. Presumably distance from a subway line entrance (for which commute time is most likely serving as a partial proxy) would explain a great deal more. I am working on calculating measures of distance from subway lines for each census tract right now.
+
+```{r}
+#| echo: false
+#| warning: false
+#| results: asis
+trans_reg<-lm(bus ~ avg_com + hispanic + mhi, data = acs)
+
+stargazer(trans_reg,type = 'html', dep.var.labels = 'Bus Ridership',
+          covariate.labels = c('Average Commute Time','Percent Hispanic','Median Household Income'))
+```
+
+The transit underserved also tend to be traveling between outer boroughs. Data from the DOT's 2019 Community Mobility Survey (the last year for which data is available) reveal that while all of the top ten most frequent trips taken by subway have Manhattan Core as either an origin or destination, only two of the top bus trips do.
+
+The variable here is 'Bus +,' which is bus riders combined with Access-a-Ride and \$1 van riders.
+
+```{r}
+#| echo: false
+
+detailed_mobility%>%
+  select(o_cms_zone,d_cms_zone,perc_bus_plus,perc_subway)%>%
+  arrange(desc(perc_bus_plus))%>%
+  as.data.frame()%>%
+  slice_head(n=10)%>%
+  gt()%>%
+  cols_label(o_cms_zone = 'Origin', d_cms_zone = 'Destination',
+             perc_bus_plus = '% Bus+',perc_subway = '% Subway')
+
+detailed_mobility%>%
+  select(o_cms_zone,d_cms_zone,perc_bus_plus,perc_subway)%>%
+  arrange(desc(perc_subway))%>%
+  as.data.frame()%>%
+  slice_head(n=10)%>%
+  gt()%>%
+  cols_label(o_cms_zone = 'Origin', d_cms_zone = 'Destination',
+             perc_bus_plus = '% Bus+',perc_subway = '% Subway')
+```
+
+Below is an attempt to visualize the above (I am working on a better way to do this).
+
+```{r}
+#| echo: false
+dl <- st_transform(desire_lines, "+init=epsg:4326")
+pal_line <- colorBin(palette = "viridis", 
+                     domain = dl$perc_bus_plus,
+                     pretty = T)
+
+
+leaflet()%>%
+  addProviderTiles(provider = "CartoDB.Positron")%>%
+  addPolylines(data = dl,
+               fill = FALSE,
+               fillOpacity = .5,
+               color = ~pal_line(perc_bus_plus),
+               opacity = 1,
+               weight = ~(all/100),
+               )%>%
+  addLegend("bottomright", 
+            pal = pal_line, 
+            values = dl$perc_bus_plus,
+            title = "% Trips by Bus",
+            opacity = 1)
+
+
+```
+
+</b>
+
+These associations don't make for an easily defined demographic unit, though this might conceivably play into the community's favor. Rather than being a proxy for some other demographic category, needing remedy for a failing transit system is a category unto itself that extends to all boroughs and multiple races and classes. It has a real concrete need and real coalitional potential. In a world in which racial discrimination alone is not enough to demonstrate a community in need of protecting to the judiciary, issues such as transit offer a broad, heterogeneous swath of geographically clustered people with a concrete need for redress. Put differently, transit could be seen as a latent variable connecting various groups whose individual situations alone would not entitle them to formal legal protection but might, when packed behind a demonstrable and pragmatic political issue, find some measure of protection.
+
+# Plans for Continuation
+
+I will continue to explore the population quantitatively via the data sources listed below. As one aspect of continuation I hope to be able to combine the DOT's Mobility survey with R's rich potential in geospatial analysis to model what potential policy interventions in key areas might look like, should this community be able to assert its voice. I would also like to use any testimony to the redistricting commission that can be transferred into plain text to perform light computational text analysis, especially focused on any testimony that mentions transit.
+
+### Data Sources
+
+1.  5-Year ACS Data which includes many questions on transportation and commute times
+
+2.  Open MTA data, which deals with bus times, use of bus wheelchair lifts, bunching on bus lines, and use of access-a-ride services
+
+3.  Open DOT data, which includes the Community Mobility Survey (there is a wealth of information there I haven't touched yet)
+
+4.  Previous redistricting testimony that mentions transportation
+
+5.  I am currently looking for citywide survey data that explores public opinion on transit
+
+6.  If possible, interviews with staff members of City Council members on the transportation committee

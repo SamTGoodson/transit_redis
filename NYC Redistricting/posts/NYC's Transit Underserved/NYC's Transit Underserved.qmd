@@ -1,0 +1,803 @@
+---
+title: "NYC's Transit Underserved"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: Load Packages 
+#| include: false
+
+library(tidycensus)
+library(censusapi)
+library(sf)
+library(leaflet)
+library(tidyverse)
+library(lubridate)
+library(gt)
+library(rio)
+library(janitor)
+library(stargazer)
+library(stplanr)
+library(tmap)          
+library(sfnetworks) 
+library(marginaleffects)
+library(ggcorrplot)
+```
+
+```{r}
+#| label: load data
+#| include: false
+
+nyc_counties<-c('005','047','061','081','085')
+
+ny_transpo = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = "B08301")
+
+table_transpo<-pivot_wider(ny_transpo,names_from = variable, values_from = c(estimate,moe))
+
+ny_race = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B02001')
+
+table_race<-pivot_wider(ny_race,names_from = variable, values_from = c(estimate,moe))
+
+joined<-left_join(table_race,table_transpo)
+
+ny_ctime = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B08303')
+
+table_ctime<-pivot_wider(ny_ctime,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_ctime)
+
+ny_cit = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B05001')
+table_cit<-pivot_wider(ny_cit,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_cit)
+
+ny_mhi = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B19013')
+table_mhi<-pivot_wider(ny_mhi,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_mhi)
+
+ny_eth = get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B03002')
+table_eth<-pivot_wider(ny_eth,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_eth)
+
+nyc_medrent<- get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B25064')
+table_medrent<-pivot_wider(nyc_medrent,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_medrent)
+
+nyc_rentperc<- get_acs(
+  geography = "tract",
+  state = "NY",
+  county = nyc_counties,
+  table = 'B25070')
+table_rentperc<-pivot_wider(nyc_rentperc,names_from = variable, values_from = c(estimate,moe))
+joined<-left_join(joined,table_rentperc)
+
+
+acs<-joined%>%
+  rename('white' = estimate_B02001_002, 'black' = estimate_B02001_003, 'am_ind' = estimate_B02001_004,'asian'=estimate_B02001_005,'nat_haw' = estimate_B02001_006, 'other' = estimate_B02001_007,
+         'whiteNH' = estimate_B03002_003, 'black_eth' = estimate_B03002_004, 'am_ind_eth' = estimate_B03002_005,'asian_eth'=estimate_B03002_006,'nat_haw_eth' = estimate_B03002_007, 'other_eth' = estimate_B03002_008,'hispanic' = estimate_B03002_012,
+         'bus' = estimate_B08301_011, 'bike' = estimate_B08301_018, 'walk' = estimate_B08301_019, 'subway' = estimate_B08301_012,'car' = estimate_B08301_002,
+    'citizen' = estimate_B05001_002,'citizenPR' = estimate_B05001_003,'citizenBA'=estimate_B05001_004, 'naturalized' = estimate_B05001_005, 'noncit' = estimate_B05001_006,
+         'mhi' = estimate_B19013_001, 'med_rent' = estimate_B25064_001)
+
+acs$transpo_all<-acs$estimate_B08303_001
+acs$perc_bus<-((acs$bus/acs$transpo_all)*100)
+acs$perc_subway<-((acs$subway/acs$transpo_all)*100)
+
+bus<-import('~/data/mta/MTA_Bus_Speeds__Beginning_2015.csv')
+bus<-bus%>%
+  clean_names()
+bus$month <- ym(bus$month)
+```
+
+```{r}
+#| label: new vars
+#| include: false
+
+acs<-acs%>%
+separate(NAME,c('Tract','County','State'), sep = ",")
+
+acs<-acs%>%
+rename('total_pop' = estimate_B03002_001)
+
+acs<-acs%>%
+  mutate(perc_white = round((whiteNH/total_pop)*100),
+         perc_hisp = round((hispanic/total_pop)*100),
+         perc_black = round((black_eth/total_pop)*100),
+         perc_asian = round((asian_eth/total_pop)*100))
+
+acs<-acs%>%
+  mutate(transit = (bus + subway),
+         no_car = (bus + subway + walk + bike),
+         trans_min_car = ((bus+subway)-car),
+         no_car_min = ((bus + subway + walk + bike) - car))
+
+acs<-acs%>%
+  mutate(avg_com = ((estimate_B08303_002*5) + (estimate_B08303_003*9) + 
+                      (estimate_B08303_004*14) + (estimate_B08303_005*19) + 
+                      (estimate_B08303_006* 24) + (estimate_B08303_007*29) +
+                      (estimate_B08303_008 *34) + (estimate_B08303_009*39) +
+                      (estimate_B08303_010*44) + (estimate_B08303_011*59) + 
+                      (estimate_B08303_012 * 89) + (estimate_B08303_013*110))/(estimate_B08301_001+1))
+```
+
+```{r}
+#| label: maps
+#| include: false
+
+c_map<-read_sf('~/data/NYCShapefile/nyct2020_22b')
+
+map2<-left_join(c_map,acs)
+map2_sf <- st_transform(map2, "+init=epsg:4326")
+map2<-left_join(c_map,acs)
+map2_sf <- st_transform(map2, "+init=epsg:4326")
+
+bus_map<-read_sf('~/data/BusShapefile')
+bm_sf <- st_transform(bus_map, "+init=epsg:4326")
+
+prelim<-read_sf('~/data/PrelimOneShapefile/shapefile')
+prelim_sf <- st_transform(prelim, "+init=epsg:4326")
+
+cc_map<-read_sf('~/data/CCShapefile/nycc_22b')
+cc_sf <- st_transform(cc_map, "+init=epsg:4326")
+
+slow_bus<-bus_map%>%
+  filter(route_id %in% c("M57", "M50",  "M31",  "BX35", "M125", "M42",  "BX19", "M102",
+                          "B35",  "B63",  "M103", "M3",   "M7", "B12",  "M104", "M8",  
+                          "B45",  "M100", "BX11", "BX32",'B11'))
+
+slow_sf <- st_transform(slow_bus, "+init=epsg:4326")
+
+subway_stops<-read_sf('~/data/subwaystop')
+sub <- st_transform(subway_stops, "+init=epsg:4326")
+```
+
+```{r}
+#| include: false
+mobility <- read_csv("~/data/mta/Citywide_Mobility_Survey_-_Trip_Survey_2019.csv")
+nta<-sf::read_sf('~/data/NTAShapefile')
+cdt<-read_sf('~/data/CDT')
+
+survey<-read_sf('~/data/survey_zones')
+```
+
+```{r}
+#| include: false
+mobility$o_cms_zone[mobility$o_cms_zone == 'Upper Manhattan']<-'Northern Manhattan'
+mobility$d_cms_zone[mobility$d_cms_zone == 'Upper Manhattan']<-'Northern Manhattan'
+
+mobility<-mobility%>%
+  filter(!o_cms_zone %in% c('JFK','LGA'))
+mobility<-mobility%>%
+  filter(!d_cms_zone %in% c('JFK','LGA'))
+mobility<-mobility%>%
+  mutate(bus_plus = if_else(mode_type_detailed %in% c(7,15,16,17,22,23),'bus','non'))
+```
+
+```{r}
+#| include: false
+#| warning: false
+
+zones_attr <- mobility%>%
+  drop_na(o_cms_zone,d_cms_zone)%>%
+  group_by(o_cms_zone,d_cms_zone,mode_type)%>%
+  summarise(n = n())%>%
+  pivot_wider(names_from = mode_type, values_from = n)
+
+zones_attr<-zones_attr%>%
+  rename('Taxi' = `1`, 'Uber' = `2`, 'Commuter_Rail' = `3`,'Bus' =`4`,
+         'Ferry' = `5`, 'Subway' = `6`, 'Car' = `7`, 'Bike' = `8`, 'Walk' = `9`,
+         'Other' = `10`)
+
+zones_attr[is.na(zones_attr)]<- 0
+zones_attr<-zones_attr%>%
+  mutate(all = (Taxi+Uber+Commuter_Rail+Bus+
+         Ferry+Subway+Car+Bike+Walk+Other))
+zones_attr$perc_bike<-((zones_attr$Bike/zones_attr$all)*100)
+zones_attr$perc_bus<-((zones_attr$Bus/zones_attr$all)*100)
+```
+
+```{r}
+#| include: false
+#| warning: false
+#| label: detailed mobility
+
+
+detailed_mobility = mobility%>%
+  drop_na(o_cms_zone,d_cms_zone)%>%
+  group_by(o_cms_zone,d_cms_zone,mode_type_detailed)%>%
+  summarise(n = n())%>%
+  pivot_wider(names_from = mode_type_detailed, values_from = n)
+
+detailed_mobility[is.na(detailed_mobility)]<- 0
+
+detailed_mobility<-detailed_mobility%>%
+rename(
+'yellow_taxi' = `1`, 'green_taxi' = `2`, 'uber' = `3`,
+'uberpool' = `4`, 'car_service' = `5`, 'commuter_rail' =`6`,
+'express_bus' = `7`, 'si_ferry' =`8`,'nyc_ferry' = `9`,
+'other_ferry' = `10`, 'subway' = `11`,'path'= `12`,'amrtrak'=`13`,
+'other_rail' = `14`,'sbs'=`15`,'lbs'=`16`,'accessaride'=`17`,'uni_shuttle'=`18`,
+'employer_shuttle'=`19`,'other_shuttle'=`20`,'intercity_bus'=`21`,'other_bus'=`22`,
+'dollar_van'=`23`,'carpool'=`24`,'hv1'=`25`,'hv2'=`26`,'hv3'=`27`,'hv4'=`28`,'hv5'=`29`,
+'other_vehicle'=`30`,'rental'=`31`,'work_car'=`32`,'friend_car'=`33`,'other_car'=`34`,
+'carshare'=`35`,'motorcycle'=`36`,'revel'=`37`,'moped'=`38`,'scooter_other'=`39`,
+'ebike'=`40`,'citi_bike'=`41`,'e_citi'=`42`,'dockless_share'=`43`,'e_dockless'=`44`,
+'rented_bike'=`45`,'borrowed_bike'=`46`,'owned_bike'=`47`,'walk'=`48`,'other'=`49`,
+'missing'=`995`)
+
+detailed_mobility<-detailed_mobility%>%
+  rowwise()%>%
+  mutate(all = sum(c_across(yellow_taxi:other_ferry)))
+colnames(detailed_mobility)
+detailed_mobility<-detailed_mobility%>%
+  mutate(bus_plus = (express_bus+sbs+lbs+accessaride+other_bus+dollar_van))
+
+
+alt_tab<-mobility%>%
+  drop_na(o_cms_zone)%>%
+  tabyl(o_cms_zone, bus_plus)%>%
+  adorn_percentages()
+
+alt_tab$zone_name <- alt_tab$o_cms_zone
+
+lines_map<-merge(alt_tab,survey, by = 'zone_name')
+lines_map<-st_as_sf(lines_map)
+
+detailed_mobility$perc_bus_plus<-round(((detailed_mobility$bus_plus/detailed_mobility$all)*100))
+detailed_mobility$perc_subway<-round(((detailed_mobility$subway/detailed_mobility$all)*100))
+
+od_intra = filter(detailed_mobility, o_cms_zone == d_cms_zone)
+od_inter = filter(detailed_mobility, o_cms_zone != d_cms_zone)
+desire_lines = od2line(od_inter, lines_map)
+```
+
+# Introduction
+
+New Yorkers spend an enormous amount of our lives in transit. We define ourselves by the transit lines that we and our neighbors take together. We bond over complaints about the quality of service and the likelihood of improvements. We come to know the enormity of the city, and ourselves as part of that enormity, as we learn to pilot our way through it on bicycle, bus, train, or on foot. On the days that old train cars are retired thousands gather to join them on their last run. Transit is vitally important the world over, but perhaps nowhere is the transit system as much a part of our understanding of ourselves as it is in New York. The strands of this system that we use, day in and day out, are the foundations of a community as surely as are our shared streets, parks, grocery stores, and restaurants.
+
+Unfortunately, not all of these transit communities are treated equally. New Yorkers who rely on city buses for their transportation needs suffer through long wait times and irregular service only to board the slowest buses of any city in the United States. Table 1 displays the average city bus speed by borough in September 2022. This community faces an unjust inequality in service compared to those who can spend the entity of their commutes on the subway. This inequality is unsurprisingly connected to others. Lower-income New Yorkers, immigrants, and New Yorkers of color are the city's most frequent bus riders. This paper will argue that due to the fundamental inequality in transit service, and because this inequality is connected to others that riders face, that bus riders constitute a community of interest in need of political protection during the process of redistricting. Further, it will argue that because the Supreme Court has become increasingly hostile to uses of race and ethnicity to define communities of interest, that using transit to define a community of interest offers a model of how policy issues with coalitional potential could be used to define community elsewhere. The paper will first lay out the case for transit to be seen as a critical policy issue. It will then explore the demographic characteristics of New York City's bus riders. It will then turn to the public testimony given to the City's redistricting commission to explore how New Yorkers use transit to define their own communities. With this understanding of transit in mind it will then turn to some of the core policy issues these communities might unite around, and what broader coalitional potential those policy issues might have. Finally, it will discuss the process of drawing a city council map with the transit underserved in mind and reflect on how this community is treated by the new city council map.
+
+```{r}
+#| label: bus speed
+#| echo: false
+#| fig-cap: 'Table 1'
+
+bus%>%
+  filter(month == '2022-06-01')%>%
+  group_by(borough)%>%
+  summarise(avg = round(mean(average_speed),1))%>%
+  gt()%>%
+  cols_label(
+    borough = 'Borough',
+    avg = 'Avg MPH'
+  )
+```
+
+## Why Transit?
+
+Lack of access to fast, reliable transit is more than an issue of convenience. The amount of time spent riding and waiting for transit has profound consequences in terms of racial and economic equality. In his posthumously published essay "A Testament of Hope" Martin Luther King Jr. chose to highlight transit inequity as a key driver of urban racial inequality. "Urban transit systems in most American cities, for example, have become a genuine civil rights issue" he wrote, "because the layout of rapid-transit systems determines the accessibility of jobs to the black community. If transportation systems in American cities could be laid out so as to provide an opportunity for poor people to get meaningful employment, then they could begin to move into the mainstream of American life" (King 1969). The problem King is describing is essentially what scholars of transit access have termed the "spatial mismatch hypothesis," the straightforward idea that, as a result of multiple interlocking patterns of discriminations, jobs exist in places that unemployed populations do not live (John F. Kain 1968; 1992; Blumenberg and Manville 2004; Brandtner, Lunn, and Young 2019).
+
+Though much of the research on spatial mismatch has concentrated on automobile commute times there is a literature that has explored the effect of transit access on employment opportunity. Thomas Sanchez evaluated the impact of a census block group's distance from rail and bus stops on the number of weeks worked in a year in Portland and Atlanta. Sanchez found that distance from a bus stop in particular had a strong and significant relationship to weeks worked on all populations in Atlanta and all white populations in Portland (the null nonwhite findings in Portland may be attributable to the small size of that population) (Sanchez 1998). Sanchez's findings are intriguing, but they fail to account for the potentially endogenous relationship between transit locations and employment. Attempting to remedy this Justin Tyndall uses the exogenous shock of hurricane Sandy to measure the effect of resulting transit closures on employment. He finds that, while unemployment rates were declining across the city in the year after the hurricane, they increased in areas in which the R train, whose interborough service was temporarily shuttered, was the primary means of commuting to Manhattan (Tyndal 2018). These two studies are part of a larger, globe spanning literature on the interaction of transit availability and economic justice which argue that transit has a measurable effect on a community's economic opportunity, and therefore communities who have poor access to transit have at least one common source of immiseration (Barton and Gibbons 2017; Glaeser, Kahn, and Rappaport 2008; Liu and Bardaka 2021; Sanchez 1999; 2008; DeGuzman, Merwin, and Bourguignon 2013; McKenzie 2013). Time spent in transit is much more than an issue of convenience, it has material impacts on peoples' lives and we should therefore be interested in who is being forced to spend the most time in transit and what can be done about it.
+
+## Who Rides the Bus?
+
+Bus riders are a diverse group. Ridership is highest in some of the wealthiest and whitest census tracts of the Upper East Side and in some of the poorest of The Bronx. Despite this heterogeneity, some trends stand out. To explore these demographic trends, we will turn to three sources of data. First to census tract level data from the 5-year American Community Survey which will paint a general demographic picture. Second to individual-level data from the 5-year PUMS to get a more detailed picture of who is riding the bus. Finally, to data from the DOT's Community Mobility Survey to look at the routes most bus riders are taking.
+
+Map 1 below displays bus ridership by census tracts, as well as the position of subway stops and the city's slowest bus lines. Demographic information for each census tract is available by clicking on it. The map suggests that the highest densities of riders are located in pockets of the city not served well by the subway, particularly in the Western Bronx, Eastern Queens, and Staten Island.
+
+<br>
+
+```{r}
+#| echo: false
+#| fig-cap: 'Map 1' 
+
+map2_sf$transpo_all <- (map2_sf$transpo_all + .01)
+map2_sf$p_bus<-((map2_sf$bus/map2_sf$transpo_all)*100)
+
+pal2 <- colorNumeric(palette = "viridis", 
+                     domain = map2_sf$perc_bus)
+
+
+leaflet(map2_sf)%>%
+  addProviderTiles(provider = "CartoDB.Positron") %>%
+  addPolygons(popup = ~paste0(NTAName,'</br>',
+                              perc_white,'% White','</br>',
+                              perc_black,'% Black','</br>',
+                              perc_hisp,'% Hispanic','</br>',
+                              perc_asian,'% Asian','</br>',
+                              '$',mhi,' Median Household Income'),
+              stroke = FALSE,
+              smoothFactor = 0,
+              fillOpacity = 0.7,
+              color = ~ pal2(p_bus),
+              group = 'Bus')%>%
+  addLegend("bottomright", 
+            pal = pal2, 
+            values = ~ p_bus,
+            title = "% Bus Riders",
+            opacity = 1,
+            group = 'Bus')%>%
+  addPolylines(data = slow_sf,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Slowest Bus Lines')%>%
+  addPolylines(data = prelim_sf,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Prelim City Council')%>%
+  addPolylines(data = cc_sf,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Current City Council')%>%
+  addMarkers(
+   data = sub,
+    label = ~stop_name,
+   group = 'Subway Stops'
+  )%>%
+  addLayersControl(
+    baseGroups = ('Bus'),
+    overlayGroups = c('Slowest Bus Lines','Prelim City Council','Current City Council','Subway Stops'),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+<br>
+
+Figure 1 displays the correlations between a census track's population by ethnicity and income and various modes of transportation. Similarly to Map 1 the correlations suggest that bus riders tend to live in census tracts that are more Black and Hispanic and which are lower income.
+
+<br>
+
+```{r}
+#| echo: false
+cor2<-acs%>%
+  select(perc_white,perc_hisp,perc_black,perc_asian,perc_subway,perc_bus,mhi)|>
+  cor(use = 'complete.obs')
+ggcorrplot(cor2,
+           type = "lower",
+           lab = TRUE)+
+  scale_x_discrete(labels = c('% Hispanic','% Black','% Asian','% Subway',
+                              '% Bus','MHI'))+
+  scale_y_discrete(labels = c('% White','% Hispanic','% Black','% Asian',
+                              '% Subway','% Bus'))
+
+```
+
+<br>
+
+This correlation between Median Household Income and bus ridership holds in every borough except for Staten Island, suggesting a different population of bus riders in that borough.
+
+<br>
+
+```{r}
+#| echo: false
+#| warning: false
+acs%>%
+  ggplot(aes(mhi,bus))+
+  geom_point()+
+  geom_smooth(method = 'lm', se = T)+
+  facet_wrap(~County)+
+  theme_minimal()+
+  labs(title = "Bus Ridership by Median Hhousehold Income", x = 'MHI',
+       y = 'Bus Ridership')
+```
+
+<br>
+
+There is also a positive relationship across all 5 boroughs between bus ridership and commute time. While this may be unsurprising given the information about bus speeds displayed in Table 1, it is noteworthy that this relationship holds geographically, suggesting the increase of the commute times is indeed a product of bus speeds and simply commute distance.
+
+```{r}
+#| echo: false
+#| warning: false
+acs%>%
+  ggplot(aes(avg_com,bus))+
+  geom_point()+
+  geom_smooth(method = 'lm', se = T)+
+  facet_wrap(~County)+
+  theme_minimal()+
+  labs(title = "Bus Ridership by Hispanic Population", x = 'Hispanic Population',
+       y = 'Bus Ridership')
+```
+
+<br>
+
+Table 1 attempts to fit these demographic variables into a series of ordinary least squares regression models. In each model the dependent variable is the percentage of the census tract that commutes via bus. The independent variables are the number of subway stops in a census tract, the median household income, and the average Black, Hispanic, and Asian percentage of a census tract. Because the variables are all measured on different scales they have been standardized for ease of interpretation. Additionally, because race is recorded as a percentage of a tract's population, I decided to include each percentage as an independent variable, rather than making a series of dummy variables that would indicate what the racial majority was. I did not include a white percentage in an effort to avoid multicollinearity, though in areas of the city with very low white populations this may still be an issue (though I can't imagine the multicollinearity would ever be perfect). The analysis of the PUMA data below allows for more nuance in the racial variable.
+
+```{r}
+#| echo: false
+#| warning: false
+#| results: asis
+#| fig-cap: 'Table 2'
+
+ct_sub<-st_join(map2,subway_stops, join = st_contains)
+
+ct_s<-ct_sub%>%
+  select(CT2020,stop_id)
+
+ct_s<-ct_s%>%
+  group_by(CT2020)|>
+  summarise(subway_stops = n())
+
+ct_s<-st_drop_geometry(ct_s)
+
+ct_w_subway<-left_join(map2,ct_s,by='CT2020')
+
+ct_w_subway<-ct_w_subway|>
+  mutate(s_sub = scale(subway_stops), s_mhi = scale(mhi), s_med_rent = scale(med_rent),s_bl = scale(perc_black),s_hisp = scale(perc_hisp),s_as = scale(perc_asian),s_commute = scale(avg_com))
+
+
+bus_ols2.1<-lm(perc_bus ~ s_sub + s_mhi + s_med_rent, data = ct_w_subway)
+bus_ols2.2<-lm(perc_bus ~ s_bl, data = ct_w_subway)
+bus_ols2.3<-lm(perc_bus ~ s_hisp, data = ct_w_subway)
+bus_ols2.4<-lm(perc_bus ~ s_as, data = ct_w_subway)
+bus_ols2.5<-lm(perc_bus ~ s_sub +  s_mhi + s_med_rent + s_bl + s_hisp + s_as, data = ct_w_subway)
+stargazer(bus_ols2.1,bus_ols2.2,bus_ols2.3,bus_ols2.4,bus_ols2.5, type = 'html',dep.var.labels = 'Bus Ridership', covariate.labels = c('Subway Stops','Median Household Income','Median Rent',
+                                                                                                                 'Percent Black','Percent Hispanic','Percent Asian'))
+```
+
+Model 1 examines the number of subways stops located in a census tract, the median household income of the census tract, and the median rent. All three have sizable negative coefficients and are significant at the 99% confidence level. Models 2-5 introduce the racial variables, the share of Black and Hispanic residents both have significant and sizable positive effects, while the share of Asians is significant and negative. Model 6 combines the variables. A census tract's Asian share and its medium income lose their significance. The strongest variables in this model are Black share of the population and median rent. These models describe the bus-riding population broadly as more likely to be Black and living in lower rent areas.
+
+The individual-level PUMA data can add detail to the picture painted by the census tract-level data. In table 3 we see the average commute time and income of every commuting mode and in table 4 we see the racial breakdown. The bus is the lowest income form of commuting and has one of the longer commute times, though not longer, on average, than the subway. Most bus riders are Black and Hispanic, with both groups being slightly over-represented relative to their portion of the New York City population.
+
+```{r}
+#| include: false
+j_pums<-import('~/Redistricting/Redistricting/ACS1620NYCPnew.sav')
+
+puma_transpo = get_pums(
+  survey = 'acs5',
+  state = "NY",
+  variables = c('PUMA','SERIALNO','DIVISION','SPORDER','JWTRNS','POWPUMA'))
+
+puma_transpo<-puma_transpo%>%
+  rename('CBSERIAL' = SERIALNO, 'PERNUM' = SPORDER)
+puma_transpo$PUMA<-as.numeric(puma_transpo$PUMA)
+puma_transpo$CBSERIAL<-as.numeric(puma_transpo$CBSERIAL)
+pumas<-left_join(j_pums,puma_transpo,by = c('PUMA','CBSERIAL','PERNUM'))
+
+commuter<-pumas%>%
+  filter(JWTRNS != 'bb')
+```
+
+```{r}
+#| include: false
+commuter<-commuter%>%
+  mutate(race_w_names = case_when(
+    nhrace == 1 ~ 'NH White',
+    nhrace == 2 ~ 'NH Black',
+    nhrace == 3 ~ 'Hispanic',
+    nhrace == 4 ~ 'NH Asian',
+    nhrace == 5 ~ 'Other'
+  ))
+
+commuter$race_w_names<-as.factor(commuter$race_w_names)
+commuter$race_w_names<-relevel(commuter$race_w_names,ref = 'NH White')
+
+commuter<-commuter%>%
+  mutate(transit = case_when(
+    JWTRNS == '01' ~ 'Car',
+    JWTRNS == '02' ~ 'Bus',
+    JWTRNS == '03' ~ 'Subway',
+    JWTRNS == '04' ~ 'Commuter Train',
+    JWTRNS == '05' ~ 'Light Rail',
+    JWTRNS == '06' ~ 'Ferry',
+    JWTRNS == '07' ~ 'Taxi',
+    JWTRNS == '08' ~ 'Motorcycle',
+    JWTRNS == '09' ~ 'Bicycle',
+    JWTRNS == '10' ~ 'Walk',
+    JWTRNS == '11' ~ 'WFH',
+    JWTRNS == '12' ~ 'Other'
+  ))
+
+```
+
+```{r}
+#| echo: false
+#| fig-cap: 'Table 3'
+commuter%>%
+  group_by(transit)%>%
+  summarise(
+            median = median(TRANTIME),
+            mean_inc = round(mean(FTOTINC),1),
+            median_inc = median(FTOTINC),
+            sd = sd(FTOTINC))%>%
+  gt()%>%
+  cols_label(transit = 'Commute Type', median = 'Median Commute Time', mean_inc = 'Mean Income',
+             median_inc = 'Median Income')%>%
+  fmt_currency(columns = c(mean_inc,median_inc),
+               currency='USD')%>%
+  fmt_duration(
+    columns = median,
+    input_units = 'minutes'
+  )
+```
+
+<br>
+
+```{r}
+#| echo: false
+#| fig-cap: 'Table 4'
+commuter%>%
+  filter(transit == 'Bus')%>%
+  tabyl(race_w_names)%>%
+  adorn_pct_formatting()%>%
+  gt()%>%
+  tab_header(title = "Bus Riders")|>
+  cols_hide(columns = n)%>%
+  cols_label(race_w_names = 'Race',percent = 'Percent')
+```
+
+```{r}
+#| echo: false
+puma_shape<-read_sf('~/Redistricting/PumaShapefile')
+
+crs_to_use <- st_crs(subway_stops) 
+crs_epsg <- crs_to_use$epsg 
+
+p_proj <- st_transform(puma_shape, crs=crs_epsg)
+
+puma_sub<-st_join(subway_stops,p_proj, join = st_within)
+
+p_s<-puma_sub%>%
+  select(puma,stop_id)
+
+p_s<-st_drop_geometry(p_s)
+
+p_s<-p_s%>%
+  group_by(puma)%>%
+  summarise(subway_stops = n())
+p_s$puma<-as.numeric(p_s$puma)
+p_s<-p_s%>%
+  add_row(puma = 4104, subway_stops = 0)
+p_s$PUMA<-p_s$puma
+commuter<-left_join(commuter,p_s,by= 'PUMA')
+```
+
+As with the tract-level data, we can dig deeper into the characteristics of bus ridership by fitting a series of models, this time logistic regressions. In this case the dependent variable is a binary that records 1 if an individual reports commuting by bus and a 0 if they do not. The independent variables are age, gender, the number of subway stops in the PUMA, commute time, household income per person, monthly rent, whether the individual is foreign-born, and race represented by a series of dummy variables. Income, rent, and commute time have again been standardized to ease interpretation.
+
+```{r}
+#| echo: false
+#| warning: false
+#| results: asis
+#| fig-cap: 'Table 5'
+
+commuter<-commuter%>%
+  mutate(bus_dummy = if_else(transit == 'Bus',1,0))
+
+commuter<-commuter|>
+  mutate(s_inc = scale(PCHHI), s_rent = scale(RENTGRS), s_commute = scale(TRANTIME))
+
+commuter$foreign<-as.factor(commuter$foreign)
+commuter$race_w_names<-as.factor(commuter$race_w_names)
+
+bl2.1<-glm(bus_dummy ~ s_inc, data = commuter,family = 'binomial')
+bl2.2<-glm(bus_dummy ~ s_rent, data = commuter,family = 'binomial')
+bl2.3<-glm(bus_dummy ~ race_w_names, data = commuter,family = 'binomial')
+bl2.4<-glm(bus_dummy ~ foreign, data = commuter,family = 'binomial')
+bl2.5<-glm(bus_dummy ~ s_inc + race_w_names + s_rent + foreign, data = commuter,family = 'binomial')
+bl2.6<-glm(bus_dummy ~ s_inc + race_w_names + s_rent + foreign + subway_stops, data = commuter, family = 'binomial')
+bl2.7<-glm(bus_dummy ~ s_inc + race_w_names + s_rent + foreign + subway_stops + AGE + SEX, data = commuter, family = 'binomial')
+stargazer(bl2.1,bl2.2,bl2.3,bl2.4,bl2.5,bl2.6,bl2.7, type = 'html',dep.var.labels = 'Bus Dummy', covariate.labels = c('Income','Rent','Hispanic','Asian','Black','Other','Foreign Born',
+                                                                                                                                'Subway Stops','Age','Sex'))
+```
+
+In these logit models we see that, with Non-Hispanic White as the reference category, being Black and Hispanic have strong, significant effects on bus ridership. Interestingly, while all racial categories lose some effect when controls for rent, income, and subway stops are introduced, the Asian coefficient is dramatically reduced and loses some significance just as it does in the OLS model. This suggests that perhaps Asians live in areas better served by subway lines, or perhaps rely more on bicycles or automobiles when they are not. Another interesting aspect of these models is the effect of being female, which remains relatively unchanged and significant across all four. Women appear far more likely to ride the bus. The effect of being foreign-born remains significant but smaller than race and gender. Though reduced by other demographic variables, income has a strong and significant negative effect on bus ridership unlike in the full OLS model. In sum, we see a bus-riding population that is largely female, Black and Hispanic, and lower income, and somewhat more likely to be foreign-born.
+
+To better understand the commuting trajectories of bus riders, and the transit underserved more generally, we can turn to the NYC DOT's Community Mobility Survey. This data demonstrates that the transit underserved tend to be traveling between outer boroughs. The variable used in the table below is 'Bus +,' which is bus riders combined with Access-a-Ride and dollar van riders. This additive variable is used because both these other modes of transit tend to take on riders who would otherwise be on a bus. The dollar vans in particular often copy bus routes exactly hoping to pick up passengers frustrated with long wait times. While all of the top ten most frequent trips taken by subway have Manhattan Core as either an origin or destination, only two of the top bus trips do.
+
+```{r}
+#| echo: false
+detailed_mobility%>%
+  select(o_cms_zone,d_cms_zone,perc_bus_plus,perc_subway)%>%
+  arrange(desc(perc_bus_plus))%>%
+  as.data.frame()%>%
+  slice_head(n=10)%>%
+  gt()%>%
+  tab_header(title = "Bus Trips")|>
+  cols_label(o_cms_zone = 'Origin', d_cms_zone = 'Destination',
+             perc_bus_plus = '% Bus+',perc_subway = '% Subway')
+```
+
+```{r}
+#| echo: false
+#| fig-cap: 'Table 6'
+detailed_mobility%>%
+  select(o_cms_zone,d_cms_zone,perc_bus_plus,perc_subway)%>%
+  arrange(desc(perc_subway))%>%
+  as.data.frame()%>%
+  slice_head(n=10)%>%
+  gt()%>%
+  tab_header(title = "Subway Trips")|>
+  cols_label(o_cms_zone = 'Origin', d_cms_zone = 'Destination',
+             perc_bus_plus = '% Bus+',perc_subway = '% Subway')
+```
+
+Below is a visualization of the above using what transit researchers refer to as "desire lines." The width represents the volume of trips the color represents the number of those trips taken by bus.
+
+```{r}
+#| echo: false
+#| fig-cap: 'Figure 6'
+
+
+dl <- st_transform(desire_lines, "+init=epsg:4326")
+pal_line <- colorBin(palette = "viridis", 
+                     domain = dl$perc_bus_plus,
+                     pretty = T)
+
+
+leaflet()%>%
+  addProviderTiles(provider = "CartoDB.Positron")%>%
+  addPolylines(data = dl,
+               fill = FALSE,
+               fillOpacity = .5,
+               color = ~pal_line(perc_bus_plus),
+               opacity = 1,
+               weight = ~(all/100),
+               )%>%
+  addLegend("bottomright", 
+            pal = pal_line, 
+            values = dl$perc_bus_plus,
+            title = "% Trips by Bus",
+            opacity = 1)
+
+
+```
+
+<br>
+
+Bus riders tend to be lower-income Black and Hispanic women traveling between the outer boroughs. They are also more likely to be immigrants and to pay lower rents and have longer commute times. These associations don't make for an easily defined demographic unit, though this might conceivably play in the community's favor. Rather than being a proxy for some other demographic category, needing remedy for a failing transit system is a category unto itself that extends to all boroughs and multiple races and classes. It has a real concrete need and real coalitional potential. In a world in which racial discrimination alone is not enough to demonstrate a community in need of protection to the judiciary, issues such as transit offer a broad, heterogeneous swath of geographically clustered people with a concrete need for redress. Put differently, transit could be seen as a latent variable connecting various groups whose individual situations alone would not entitle them to formal legal protection but might, when packed behind a demonstrable and pragmatic political issue, find some measure of protection. The next section will further this claim by looking at what policy solutions this community might advocate for and those policies' coalition potential.
+
+## What is to be Done?
+
+The core problem the transit underserved face is that, due to faults in transit planning and functionality, it takes them too long to get to where they need to be. New York City buses are notoriously slow and unreliable, leaving riders waiting for unpredictable amounts of time and moving them at sluggish paces once they board (NYC Comptroller's Office 2017; NYPIRG 2022). Besides being underserved by bus and train lines, they also tend to live in areas lacking safe bike infrastructure, often keeping the relatively cheap and reliable bicycle from being a viable alternative. Private vehicles being prohibitively expensive, this leaves New Yorkers stranded in transit deserts with few alternatives but to endure the waits.
+
+This section will focus on two separate categories of policy interventions that could have the largest positive impact on this community, and which are possible mainly or entirely at the city level. They are 1) the speeding up of buses via the installation of bus corridors and camera-enforced bus lanes and 2) the construction of more protected bike infrastructure in the sections of the city where the transit underserved live. Bike infrastructure is included here because it could offer the most financially feasible alternative for those underserved by bus and subway routes. Especially in connection with existing bus and subway infrastructure bike infrastructure can greatly ease the commuting burdens of those in transit deserts. Katherine Garcia's 2021 mayoral platform, for example, offered an excellent example of the potential for interlocking bus and bike infrastructure to ease transportation burdens (McClure 2021). Both of these policy interventions are broadly supported in the transit literature. Additionally, concrete and achievable plans for these interventions have been laid out by mayoral and city council candidates as well as transit advocacy organizations in recent years, so there are "shovel-ready" plans ready to go once the political will is there to begin them.
+
+### Improve Bus Speeds
+
+There is a broad literature that supports the perhaps unsurprising conclusion that speed and reliability have a great effect on people's experience of, and likeliness to use, public transit. Much of the empirical literature on bus ridership focuses on how likely increases in reliability and speed are to get people onto the bus (Bates et al. 2001; Currie and Delbosc 2011; Carrion and Levinson 2012; Tyndall 2018; Kain and Liu 1995). Tyndall, for example, uses a propensity matching design to test the effect of the implementation of Select Bus Service routes (which greatly improved speed and reliability) on ridership and found it had a strong positive effect (Tyndall 2018). The explicit research question of these papers is getting people onto buses, not improving the commuting experience of those already on them, but we can assume broad theoretical overlap between the two projects; what makes people want to ride a bus should make people already riding happy until it hits a point of overcrowding or some other reduction in service.
+
+The best-case scenario for speed improvements would be the creation of more bus corridors in the style of 14th street in Manhattan. This intervention, which completely removed personal vehicle traffic from the street between 6 a.m. and 10 p.m., increased bus ridership as well as speeds; Mayor DeBlasio's office initially reported a 9-minute reduction in crosstown commute time for bus riders as well as a 25% increase in ridership, which reversed a 5-year trend of decline (Office of the Mayor 2019). The mayor's office also reported that there were minimal slowdowns in private vehicle traffic which might make similar projects more palatable to car drivers, though they tend to raise a horrendous uproar no matter the practicalities. The city should target other high-traffic, low-speed corridors with this same policy intervention.
+
+Where the full bus corridor is not an option the city should install lengthy camera-enforced lanes such as the one on Nostrand Avenue. This intervention has support in the literature and has been successful in cities all over the world (Hu and Schaverien 2022; Currie and Delbosc 2011). In addition to being effective the policy is popular, a 2021 survey commissioned by Transportation Alternatives and conducted by Sienna College found that 57% of New Yorkers favored taking parking spaces away to make more bus lanes. The policy has majority support in all five boroughs and has its strongest support amongst those making less than \$60,000 a year (Transportation Alternatives 2021)
+
+Before being sworn in as mayor Eric Adams signaled his support for transit infrastructure by pledging to be a 'bike mayor', building 300 miles of bike lanes and 150 miles of bus lanes; the first 22 miles of bus lanes were to come in 2022. Despite these promises, only 2 miles have been built. Additionally, the DOT recently announced that it projects it will struggle to construct the required number of miles in 2023 as well, meaning it is quite unlikely the Adams administration will meet its overall goals (Streetsblog Today Cite ). DOT primarily blames staffing shortages, both in planners and in construction workers to implement the plan. This situation is unlikely to improve, Streetsblog reports, unless the Adams administration is willing to increase the transit budget to numbers initially cited by the DOT as necessary for the desired rate of construction (Same Article). This comes amid frustrations with Transportation Commissioner Yadanis Rodriguez, once beloved by the transit community, who in his new position has been 'struggling to update routine statistics and documents that allow people to identify dangerous intersections and keep track of the city's progress on its street safety improvements' (Nessen 2022). There is of course no magic bullet for budgeting and staffing shortages, nor for commissioners failing to meet high expectations, but a city council more structurally inclined to represent the voices of the transit underserved might be able to apply pressure on both the mayor and the commissioner to fulfill his campaign promises and get the needed infrastructure built.
+
+### Improve Bike Infrastructure
+
+The bike infrastructure situation is very similar to the bus infrastructure situation. The literature is strongly supportive of the idea that better bike infrastructure keeps cyclists alive and encourages more people to bike (Xu and Chow 2020; Noland, Smart, and Guo 2019; Skov-Petersen et al. 2017; Mateo-Babiano et al. 2016; Sun, Chen, and Jiao 2018). This has certainly been the case in New York City, where CitiBike has continued to see record ridership numbers as it expands further into Queens and Brooklyn and adds stations in Manhattan (Cuba 2022). Nonetheless, the city is very slow in building it, especially in areas where the transit underserved live. This has made the commuting experience of cyclists in transit deserts, especially cyclists of color and lower-income cyclists, quite difficult (Rooney 2022; Duggan 2019; Stuart 2020). This racial inequality is a glaring injustice in its own right, but it becomes even more frustrating when we consider that these are the same populations most in need of viable alternatives to the bus and subway systems by which they are also being underserved. When the DOT does 'build' in these areas they have a tendency, frustrating to many cyclists, to paint a cyclist and a thin white line on a street while adding no further protection and call it a bike lane.
+
+As noted above new protected bike lanes were one of the "bike mayor's" campaign promises, but like bus lanes this promise has fallen short. The DOT is on track to install less than half of the promised bike lanes this year (Nessen 2022). After a recent deadly collision on Parkside Avenue, in which a 25-year-old cyclist was killed by a box truck driver trying to unsafely overtake her on a narrow road, Councilwoman Rita Joseph, in whose district the crash occurred, tweeted her frustration with the sluggish pace of infrastructure improvement. She wrote that there was a "long list of outstanding street safety priorities for the DOT that are awaiting their review/approval. It's very frustrating, but we are trying to push them to move as fast as we can" (Joseph 2022). Councilwoman Joseph is a champion of both protected bike lanes and bus lanes, and her frustration with the city's inability to act is indicative of the core problem; even with soundly designed plans that are, at least rhetorically, supported by the mayor, improvements still don't get made. This is somewhat of a puzzle, it is difficult to tell at exactly which point in the policy-making and implementation system things are breaking down. Councilwoman Joseph indicated that the problem in this particular case was at the DOT, but not the exact nature of the holdup. We can speculate that the problem may be the same staffing shortages mentioned above. It seems likely, however, that should councilwomen like Joseph have more pro-transit allies in the chamber there could be more pressure applied to get these interventions made.
+
+### Coalitional Potential
+
+These policy positions have rich coalitional potential. Beyond those specifically underserved by transit, survey results indicate Hispanic groups to be potential coalitional partners. Across every policy item polled by Transportation Alternatives, each concerning taking space away from cars and giving it to bus riders, cyclists, and pedestrians, Hispanics were the most enthusiastic supporters. 82% of Hispanics, for example, support the installation of more protected bike lanes, as opposed to 61% of whites (Transportation Alternatives 2021). This may, in part, be because Hispanics make up such a large percentage of 'deliveristas,' bike and e-bike riders working as delivery drivers for the major delivery apps. They are similarly supportive of bus lanes and bus corridors. Unfortunately, the polling does not have a large enough sample size to break down the results by individual Hispanic groups or simultaneously by ethnicity and borough. If, however, Hispanics are supportive of these policy proposals across national origin and borough they could potentially form a broad coalition for the transit underserved.
+
+Another potential set of policy allies are carless Manhattanites. While they tend to live in areas that are very well served by the subway system and are therefore not directly impacted, they also have no reason to oppose the elimination of car parking. As car owners tend to be the primary obstacle to transit upgrades, this is a significant step towards being coalition partners. Manhattanites south of 59th street also tend to be the most likely to bike to work, perhaps making them more sensitive to the transit needs of others (ACS 5-year 2020). These groups of 'transit conscious but not underserved' offer a potential base of support in the city's wealthier areas.
+
+The primary coalitional obstacle is car owners. They are a very vocal and demanding minority who achieved substantial representation, as evidenced by far-right councilwoman Vicky Paladino's recent rant about the city being unfairly dominated by "radical bike activists." As demonstrated in table 3 of the previous section car owners tend to be upper-income New Yorkers and therefore have more resources at their disposal to lobby for parking and against bike and bus infrastructure. They have historically been able to take advantage of the DOT's deference to community boards by organizing to monopolize speaking time and thereby hamstringing the proposed projects. It is in part because the transit underserved face such a well-financed and organized opposition that they need the political protections of the redistricting commission.
+
+## Transit in the Testimony to the Redistricting Committee
+
+The previous sections have demonstrated that there are some clear demographic characteristics of the transit underserved and that they have a clear policy agenda with rich coalitional potential. This may not be worth much, however, if transit is not understood by New Yorkers to be an important aspect of their identity. This section will explore the public testimony given to the New York City redistricting committee to better understand what role transit plays in New Yorkers' understanding of themselves and their communities.
+
+There were many mentions of buses specifically and transit generally in the public testimony to the redistricting committee. The word bus occurred in the testimony 150 times, subway 95, transit 37, and transportation 312 (though mentions of transportation also include cars). Most invocations of transit break into two distinct camps: 1) our community is a viable community of interest because we use the same public transportation and 2) our community needs to be kept together because we suffer from inadequate transit options and being in one district will help us remedy that. Both categories show the potential importance of transit to the redistricting process, the first in exhibiting the role that transit usage plays in the construction of self and neighborhood identity, the second in demonstrating the political weight that transportation improvements carry.
+
+Both categories also produce feasibly mappable suggestions by Miller and Grofman's standards, though in the first category the relation of transit locations to those mappable suggestions tends to be indirect (Grofman and Miller 2013). In no case was transit the sole criteria for mappable suggestions and in very few cases was it the primary suggestion. While this might demonstrate that transit alone is not sufficient criteria for our current understanding of community of interest, it also shows that transit serves as a powerful latent variable in the discussion of community and might in the future serve as a powerful proxy for other conceptions of community that, whether for reasons political or judicial, cannot be used. This section will examine the testimony in each of the two categories and then turn to a general discussion of what the testimony means for the viability of transit usage as a community of interest.
+
+### Transit as a Sense of Place
+
+The first category of testimony regarding transit concerned the place and community making effects of riding the same transit lines. In no case is transit the only marker of community mentioned but it often features prominently among others. Testimony to this end generally follows a pattern of listing many markers of community, of which transit is one, and then a plea to keep that community whole. It is worth quoting one loving description of Canarsie at length as it exemplifies this type of testimony:
+
+I have been a Canarsie resident since 1994 when my parents bought their house on East 84th and Seaview Avenue. I loved my neighborhood from the moment we arrived. I saw my parents worked so hard to give my 3 sisters and myself a better environment to live in. I appreciated it so much that I remained in Canarsie and am a homeowner myself now in East 101 St. between Ave L and M. I have been raising my 2 children here as well. They have gone to the schools, we've gone as a family to the church, library, park and supermarket. We've ridden the bus and taken the L train into the city. We have taken pride that Canarsie is a wonderful place to say we reside in. I am in opposition in the new district 46 that is being proposed. We are all part of Canarsie and it should remain the way it has been. We've earned that right to be included in district 46. It would have a severe impact for so many to separate Canarsie. I ask that you please allow us to remain as one whole Canarsie community (Redistricting Commission Testimony, p 4,667). The pathos of this argument is clearly a profound sense of place and belonging, and that sense of place is established here in part by describing the use of common transit lines. This was a commonly echoed sentiment; there was an example of this sort of definition of community in every borough. New Yorkers, at least the ones who took the time to testify, feel a strong connection to their daily mode of transportation. This resonates with Kornblum and Tonnelat's postulation that "we become New Yorkers on the subway" (Tonnelat and Kornblum 2017).
+
+The implications of this sense of community for redistricting are indirect. There are no examples of someone saying explicitly 'this transit corridor makes us a community, so design the districts around this transit corridor' (with the exception of one repeat testifier, assumedly the Mr. X mentioned in our 11/7 class discussion). This sense of community was generally evoked, however, in the service of feasibly mappable suggestions, such as the Canarsie resident above who wanted the neighborhood to remain together.
+
+### Transit Needs as Definitional of Community
+
+The other prominent category of transit testimony was about the lack of transit options (or the poor quality of existing options) and the need to keep communities together so that they could advocate for the redressing of those needs. One witness from Ozone Park argues that his community should be kept together because of their specific and concrete needs: "decent roads. Improvement of rail & bus service to deal with our mass transit wasteland to get the many civil servants who call our community home to & from work serving our city. Good schools & libraries that meet the needs of our diverse community" (Redistricting Commission Testimony, p 2,850). Here the 'mass transit wasteland' is central to the pleas to keep the community united. Another testifier worries that joining parts of Queens with the Upper East Side would dilute the attention paid to the homeless and 'specifically to the small, transit-desert community' in Blissville (Redistricting Commission Testimony, p 1,324). A witness, again in Canarsie, reminds the commission that there are transit advocates at work in the neighborhood and splitting them up could impact their work (Redistricting Commission Testimony, p. 5,666). A witness from Bay Ridge laments that alterations to the unity of the neighborhood might disrupt the work being done to improve bus services (Redistricting Commission Testimony, p. 53). There are many other references throughout the testimony on the same theme.
+
+In this category of testimony, transit location points more directly to the drawing of districts. The testimonies are not as concretely mappable as suggestions about how many blocks to shift a line East or West, but they are concrete ideas about what represents a community that should not be divided. They demonstrate the importance of transit to the daily life of New Yorkers and the political relevance of that importance. Even if transit is not the most commonly cited form of policy redress (schools, for example, are mentioned twice as often as transit) its repeated reference in the public testimony speaks to its potential as a coalitional issue.
+
+### The Viability of Transit as a Community of Interest
+
+If the first category testifies to the symbolic importance of transit to the idea of community, the second testifies to the relevance of that idea to the politics of the community. Together they offer a community of interest that, while important in its own right, also offers a proxy for other communities whose use may be restricted by judicial decision or political practicality. As the abstracted idea of a community of interest once helped to keep Greenwich Village's LGBTQ community intact in an era before explicitly doing so was politically viable, so broader policy positions such as transit can help keep ethnic minorities and low-income New Yorkers together if explicitly doing so is not politically viable (Class Discussion 11/7). The testimony in both categories above shows that transit is not an abstract category to be used simply because of this demographic utility but a vital aspect of community life that could find real purchase as a community of interest.
+
+## Mapping the Community
+
+The primary takeaways from the experience of building a new map were that 1) it is extremely difficult and 2) the accepted City Council map is good for bus riders. Throughout the map-making process I found it close to impossible to build a map that gave more districts to bus riders while respecting the charter requirements, which leads me to believe that the proposed city council map is close to the best case scenario for bus riders. In this section I will describe my map-making process and the available metrics for that map a use those to reflect on the accepted City Council map.
+
+To begin the process, I decided to follow the unity map as closely as possible and then to redraw areas with concentrated bus-riding populations to make "bus opportunity districts." After drawing these bus-heavy districts I would expand outward and try to edit the bus-light districts to make things more proportional. The areas with the heaviest concentration of bus riders are the Western Bronx, Eastern Queens, and East Central Brooklyn. Staten Island also has heavy concentrations of bus riders, but they are spread so thoroughly over the island that this area posed less of a problem.
+
+The Western Bronx was by far the most difficult area to redraw. There are two large and dense pockets of bus riders that run roughly east-west from the Harlem River, filling in the areas not served by the B, D, 2, 4, and 5. These regions are far too dense to pack into one super-bus district, but their size and placement make them hard to put into two or three. I tried extending the 10th from Washington Heights across the Highbridge to soak up the non-bus districts along the 2 train, but this made the 10th far too large. I considered using the 11th to take off Inwood to buy space in the 10th, but I think those communities are too heterogeneous to be packed together. I also tried using the 14th to take up the non-bus districts in the middle of the bus pockets, but this was not nearly large enough and threw off proportionality. The solution I have arrived at in the current map is a mix of those approaches, with the 10th taking a small section of the Bronx and the 14th serving as a buffer. I faced similar issues in Central Brookly and Eastern Queens but they were easier to resolve. In Eastern Queens there appeared to be a fairly hard and fast delineation between bus districts that were majority Black and bus districts that were majority Hispanic and Asian, so I followed that delineation.
+
+Every time I thought that I had completed my map, I would export it to R to check how it compared to the accepted council map in terms of bus representation. I would inevitably find that my map was only marginally better, if not worse, that the accepted map on the bus metric. I would then return to Dave's Redistricting and try to subtly rearrange a few districts to get more bus representation. Doing this would then push the map over the acceptable limit of some other metric. I would fix this, and then find that the map was no longer an improvement for bus riders. I went through this Sisyphean cycle several times before I concluded that perhaps the accepted map was good for bus riders. In the end, my best map had only a ½ a percentage point more bus riders per district on average than the accepted map and had the same number of districts with a standard deviation more bus riders, which was a category I tried to maximize. While this was quite disappointing in terms of producing an interesting map, it did make me more confident that a metric like transit can be used to accurately recreate maps that consider racial and ethnic communities should those criteria not be available.
+
+```{r}
+#| echo: false
+#| fig-cap: 'Map 2' 
+
+sam_cc2<-read_sf('~/Redistricting/sam-dis/district-shapes/trytwo')
+
+pal3 <- colorNumeric(palette = "viridis", 
+                     domain = map2_sf$perc_bus)
+leaflet(map2_sf)%>%
+  addProviderTiles(provider = "CartoDB.Positron") %>%
+  addPolygons(popup = ~paste0(NTAName,'</br>',
+                              perc_white,'% White','</br>',
+                              perc_black,'% Black','</br>',
+                              perc_hisp,'% Hispanic','</br>',
+                              perc_asian,'% Asian','</br>',
+                              '$',mhi,' Median Household Income'),
+              stroke = FALSE,
+              smoothFactor = 0,
+              fillOpacity = 0.7,
+              color = ~ pal3(p_bus),
+              group = 'Bus')%>%
+  addLegend("bottomright", 
+            pal = pal2, 
+            values = ~ p_bus,
+            title = "% Bus Riders",
+            opacity = 1,
+            group = 'Bus')%>%
+  addPolylines(data = sam_cc2,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Sam City Council')%>%
+  addPolylines(data = prelim_sf,
+               fill = FALSE,
+               fillOpacity = .2,
+               color = 'black',
+               opacity = .7,
+               weight = 1,
+               group = 'Accepted City Council')%>%
+  addLayersControl(
+    baseGroups = ('Bus'),
+    overlayGroups = c('Sam City Council','Accepted City Council'),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+
+```
+
+According to the metrics available from Dave's Redistricting my map meets all basic requirements. In their analysis it is 'very bad' in competitiveness, 'ok' in compactness and in county splitting, and 'very good' in minority representation and proportionality. It is again reassuring to me, in terms of using transit as a proxy for other communities, that the map did so well in minority representation having been drawn with only bus riders in mind. I think that this process, as frustrating as it was, adds to the argument for transit ridership as a community of interest. Conclusion Transit is central to New Yorkers' self-understanding and foundational to their sense of community. Certain transit users, especially those forced to rely on the city's bus system, are severely underserved by our current transit setup. These New Yorkers tend to be lower-income people of color traveling between the outer boroughs with long commute times. This population is also immigrant-heavy and tends to be more female. All of these transit-connected groups also face discrimination in other areas of their life for which they are unfortunately less and less likely to see remedy in the redistricting process. The transit discrimination that they face is explicitly policy-oriented, rather than "identity" oriented, and offers them a chance to form into a coalition that might have a better chance at receiving protection during the redistricting process.
+
+# Bibliography
+
+Barton, Michael S, and Joseph Gibbons. 2017. "A Stop Too Far: How Does Public Transportation Concentration Influence Neighbourhood Median Household Income?" Urban Studies 54 (2): 538--54. https://doi.org/10.1177/0042098015593462. Bates, John, John Polak, Peter Jones, and Andrew Cook. 2001. "The Valuation of Reliability for Personal Travel." Transportation Research Part E: Logistics and Transportation Review 37 (2--3): 191--229. Carrion, Carlos, and David Levinson. 2012. "Value of Travel Time Reliability: A Review of Current Evidence." Transportation Research Part A: Policy and Practice 46 (4): 720--41. https://doi.org/10.1016/j.tra.2012.01.003. Cuba, Julianne. 2022. "Citi Bike Smashes Its Single-Day Ridership Record." Streetsblog New York City (blog). September 10, 2022. https://nyc.streetsblog.org/2022/09/09/citi-bike-smashes-its-single-day-ridership-record/. Currie, Graham, and Alexa Delbosc. 2011. "Understanding Bus Rapid Transit Route Ridership Drivers: An Empirical Study of Australian BRT Systems." Transport Policy 18 (5): 755--64. https://doi.org/10.1016/j.tranpol.2011.03.003. DeGuzman, Pamela B., Elizabeth I. Merwin, and Cheryl Bourguignon. 2013. "Population Density, Distance to Public Transportation, and Health of Women in Low-Income Neighborhoods." Public Health Nursing 30 (6): 478--90. https://doi.org/10.1111/phn.12051. Duggan, Kevin. 2019. "Cyclists Demand New Bike Lanes in Black Communities • Brooklyn Paper." October 31, 2019. https://www.brooklynpaper.com/cyclists-demand-new-bike-lanes-in-black-communities/. Glaeser, Edward L., Matthew E. Kahn, and Jordan Rappaport. 2008. "Why Do the Poor Live in Cities? The Role of Public Transportation." Journal of Urban Economics 63 (1): 1--24. https://doi.org/10.1016/j.jue.2006.12.004. Grofman, Bernard, and Peter Miller. 2013. "Redistricting Commissions in the Western United States." UC Irvine L. Review. https://scholarship.law.uci.edu/ucilr/vol3/iss3/9/. Hu, Winnie, and Anna Schaverien. 2022. "Eric Adams Is Pushing a Plan to Speed Up Buses. Will It Work?" The New York Times, February 12, 2022, sec. New York. https://www.nytimes.com/2022/02/12/nyregion/nyc-bus-lanes.html. Kain, J. F., and Z. C. Liu. 1995. "SECRETS OF SUCCESS: HOW HOUSTON AND SAN DIEGO TRANSIT PROVIDERS ACHIEVED LARGE INCREASES IN TRANSIT RIDERSHIP," May. https://trid.trb.org/view/573964. Liu, Chang, and Eleni Bardaka. 2021. "The Suburbanization of Poverty and Changes in Access to Public Transportation in the Triangle Region, NC." Journal of Transport Geography 90 (January): 102930. https://doi.org/10.1016/j.jtrangeo.2020.102930. Mateo-Babiano, Iderlina, Richard Bean, Jonathan Corcoran, and Dorina Pojani. 2016. "How Does Our Natural and Built Environment Affect the Use of Bicycle Sharing?" Transportation Research Part A: Policy and Practice 94 (December): 295--307. https://doi.org/10.1016/j.tra.2016.09.015. McClure, Eric. 2021. "Kathryn Garcia for Mayor." StreetsPAC. June 2021. https://www.streetspac.org/kathryn_garcia_for_mayor. McKenzie, Brian S. 2013. "Neighborhood Access to Transit by Race, Ethnicity, and Poverty in Portland, OR." City & Community 12 (2): 134--55. https://doi.org/10.1111/cico.12022. Nessen, Stephen. 2022. "Mayor Adams' Pledge to Build Bike and Bus Lanes Falling Short." Gothamist. September 23, 2022. https://gothamist.com/news/mayor-adams-pledge-to-build-bike-and-bus-lanes-falling-short. Noland, Robert B., Michael J. Smart, and Ziye Guo. 2019. "Bikesharing Trip Patterns in New York City: Associations with Land Use, Subways, and Bicycle Lanes." International Journal of Sustainable Transportation 13 (9): 664--74. https://doi.org/10.1080/15568318.2018.1501520. Rooney, Kimberly. 2022. "Black and Brown Cyclists Face Heightened Policing and Poor Infrastructure." Prism. February 7, 2022. http://prismreports.org/2022/02/07/black-and-brown-cyclists-face-heightened-policing-and-poor-infrastructure/. Sanchez, Thomas W. 1999. "The Connection Between Public Transit and Employment." Journal of the American Planning Association 65 (3): 284--96. https://doi.org/10.1080/01944369908976058. ---------. 2008. "Poverty, Policy, and Public Transportation." Transportation Research Part A: Policy and Practice 42 (5): 833--41. https://doi.org/10.1016/j.tra.2008.01.011. Skov-Petersen, Hans, Jette Jacobsen, Suzanne Vedel, Thomas Nielsen, and Rask Simon. 2017. "Effects of Upgrading to Cycle Highways-An Analysis of Demand Induction, Use Patterns and Satisfaction before and After." Journal of Transport Geography 64 (September). https://doi.org/10.1016/j.jtrangeo.2017.09.011. Stuart, Shabaaz. 2020. "Hear What Black and Brown New Yorkers Think About Bike Infrastructure." Streetsblog New York City (blog). September 21, 2020. https://nyc.streetsblog.org/2020/09/21/hear-what-black-and-brown-new-yorkers-think-about-bike-infrastructure/. Sun, Feiyang, Peng Chen, and Junfeng Jiao. 2018. "Promoting Public Bike-Sharing: A Lesson from the Unsuccessful Pronto System." Transportation Research Part D: Transport and Environment 63 (August): 533--47. https://doi.org/10.1016/j.trd.2018.06.021. Tonnelat, Stéphane, and William Kornblum. 2017. International Express: New Yorkers on the 7 Train. Columbia University Press. Transportation Alternatives. 2021. "POLL: Majority of Voters Support Adding Protected Bike Lanes, Bus Lanes In Their Neighborhood; Near-Universal Support For Expanding Crosswalks, Green Spaces -- Even If It Results in Less Parking." Transportation Alternatives. January 26, 2021. https://www.transalt.org/press-releases/poll-majority-of-voters-support-adding-protected-bike-lanes-bus-lanes-in-their-neighborhood-near-universal-support-for-expanding-crosswalks-green-spaces-even-if-it-results-in-less-parking. Tyndall, Justin. 2018. "Bus Quality Improvements and Local Commuter Mode Share." Transportation Research Part A: Policy and Practice 113 (July): 173--83. https://doi.org/10.1016/j.tra.2018.04.011. Xu, Susan Jia, and Joseph Y. J. Chow. 2020. "A Longitudinal Study of Bike Infrastructure Impact on Bikesharing System Performance in New York City." International Journal of Sustainable Transportation 14 (11): 886--902. https://doi.org/10.1080/15568318.2019.1645921.
